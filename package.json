@@ -20,7 +20,8 @@
     "build": "tsc && npm run copy-protos",
     "copy-protos": "rm -rf dist/grpc/protos && cp -r src/grpc/protos dist/grpc/protos",
     "lint": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run && npm run test:signals-native",
+    "test:signals-native": "npm run build && node scripts/signals-native-esm-regression.mjs",
     "test:watch": "vitest",
     "prepublishOnly": "npm run build"
   },
