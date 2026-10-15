@@ -1,4 +1,4 @@
-import type { Config } from "../config.js";
+import { DEFAULT_IPFS_MAX_FETCH_BYTES, type Config } from "../config.js";
 
 // Public IPFS gateways for fallback reads
 const FALLBACK_GATEWAYS = [
@@ -51,11 +51,127 @@ async function fetchWithTimeout<T>(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(url, { signal: controller.signal });
-    // Keep the deadline active until the response body is consumed.
+    // PR10's deadline covers PR16's entire bounded read and decode scope.
     return await consume(response);
   } finally {
     clearTimeout(timer);
   }
+}
+
+/**
+ * Thrown when a CID's content exceeds the configured fetch bound. It is a
+ * property of the content, not of the gateway that served it, so callers do
+ * not fall back to another gateway for it.
+ */
+export class IpfsContentTooLargeError extends Error {
+  constructor(
+    public readonly cid: string,
+    public readonly maxBytes: number,
+    public readonly observedBytes: number | null
+  ) {
+    super(
+      observedBytes == null
+        ? `Content for CID ${cid} exceeds the ${maxBytes}-byte fetch bound`
+        : `Content for CID ${cid} is ${observedBytes} bytes, over the ${maxBytes}-byte fetch bound`
+    );
+    this.name = "IpfsContentTooLargeError";
+  }
+}
+
+function maxFetchBytes(config: Config): number {
+  const value = config.ipfsMaxFetchBytes;
+  // A non-finite or non-integer bound (Infinity, NaN) would let every body
+  // length compare below it; only a positive safe integer is a usable bound.
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : DEFAULT_IPFS_MAX_FETCH_BYTES;
+}
+
+/**
+ * Read a response body with a hard byte bound. A declared Content-Length
+ * above the bound is rejected before any body bytes are read; otherwise the
+ * body is consumed as a stream and the read is aborted as soon as the bound
+ * is exceeded, so a gateway that lies about (or omits) Content-Length cannot
+ * make the process buffer an unbounded body.
+ */
+async function readBodyBounded(
+  response: Response,
+  cid: string,
+  maxBytes: number
+): Promise<Buffer> {
+  const declared = response.headers.get("content-length");
+  if (declared != null) {
+    const length = Number(declared);
+    if (Number.isFinite(length) && length > maxBytes) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new IpfsContentTooLargeError(cid, maxBytes, length);
+    }
+  }
+  if (!response.body) {
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > maxBytes) {
+      throw new IpfsContentTooLargeError(cid, maxBytes, buffer.length);
+    }
+    return buffer;
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        total += value.byteLength;
+        if (total > maxBytes) {
+          throw new IpfsContentTooLargeError(cid, maxBytes, null);
+        }
+        chunks.push(value);
+      }
+    }
+  } catch (err) {
+    await reader.cancel().catch(() => undefined);
+    throw err;
+  }
+  return Buffer.concat(chunks.map((c) => Buffer.from(c.buffer, c.byteOffset, c.byteLength)), total);
+}
+
+/**
+ * Try each gateway in order; `decode` runs on the bounded body inside the
+ * per-gateway scope, so a gateway that answers 200 with a body the caller
+ * cannot use (malformed JSON) is treated like any other gateway failure and
+ * the next gateway is tried. Only IpfsContentTooLargeError is final.
+ */
+async function fetchBoundedFromGateways<T>(
+  config: Config,
+  cidOrUri: string,
+  decode: (bytes: Buffer) => T
+): Promise<T> {
+  const cid = extractCid(cidOrUri);
+  const urls = buildGatewayUrls(config, cid);
+  const bound = maxFetchBytes(config);
+  const errors: string[] = [];
+
+  for (const url of urls) {
+    try {
+      return await fetchWithTimeout(url, FETCH_TIMEOUT_MS, async (response) => {
+        if (!response.ok) throw new Error(String(response.status));
+        const bytes = await readBodyBounded(response, cid, bound);
+        return decode(bytes);
+      });
+    } catch (err: any) {
+      if (err instanceof IpfsContentTooLargeError) {
+        // Final: the content itself is over the bound.
+        throw err;
+      }
+      errors.push(`${url}: ${err.message}`);
+      continue;
+    }
+  }
+
+  throw new Error(
+    `Failed to fetch CID ${cid} from all gateways:\n${errors.join("\n")}`
+  );
 }
 
 /**
@@ -66,24 +182,8 @@ export async function fetchIpfsJson(
   config: Config,
   cidOrUri: string
 ): Promise<any> {
-  const cid = extractCid(cidOrUri);
-  const urls = buildGatewayUrls(config, cid);
-  const errors: string[] = [];
-
-  for (const url of urls) {
-    try {
-      return await fetchWithTimeout(url, FETCH_TIMEOUT_MS, async (response) => {
-        if (!response.ok) throw new Error(String(response.status));
-        return await response.json();
-      });
-    } catch (err: any) {
-      errors.push(`${url}: ${err.message}`);
-      continue;
-    }
-  }
-
-  throw new Error(
-    `Failed to fetch CID ${cid} from all gateways:\n${errors.join("\n")}`
+  return fetchBoundedFromGateways(config, cidOrUri, (bytes) =>
+    JSON.parse(bytes.toString("utf8"))
   );
 }
 
@@ -94,24 +194,5 @@ export async function fetchIpfsBytes(
   config: Config,
   cidOrUri: string
 ): Promise<Buffer> {
-  const cid = extractCid(cidOrUri);
-  const urls = buildGatewayUrls(config, cid);
-  const errors: string[] = [];
-
-  for (const url of urls) {
-    try {
-      return await fetchWithTimeout(url, FETCH_TIMEOUT_MS, async (response) => {
-        if (!response.ok) throw new Error(String(response.status));
-        const arrayBuf = await response.arrayBuffer();
-        return Buffer.from(arrayBuf);
-      });
-    } catch (err: any) {
-      errors.push(`${url}: ${err.message}`);
-      continue;
-    }
-  }
-
-  throw new Error(
-    `Failed to fetch CID ${cid} from all gateways:\n${errors.join("\n")}`
-  );
+  return fetchBoundedFromGateways(config, cidOrUri, (bytes) => bytes);
 }
