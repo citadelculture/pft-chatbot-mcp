@@ -5,9 +5,12 @@ import type { KeystoneClient } from "../grpc/client.js";
 import { encryptBinaryForRecipients } from "../crypto/encrypt.js";
 import { resolveRecipientKey } from "../crypto/resolve_key.js";
 
-// IPFS storage is capped at 10 MB per file on the Keystone gateway.
-// Encrypted blobs are slightly larger than the original due to AEAD overhead + base64 + JSON wrapper,
-// so the raw content limit is set conservatively below 10 MB.
+// IPFS storage is capped at 10 MB per file on the Keystone gateway. The cap
+// applies to the bytes that are actually uploaded, so every upload is measured
+// on its own payload: the raw buffer on the plaintext path, and the encrypted
+// blob on the encrypt_for path. Encrypted blobs are ~4/3 the size of the
+// original (AEAD overhead + base64 + JSON wrapper), so a raw buffer under the
+// cap can still produce a blob above it.
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 
 export const uploadContentSchema = z.object({
@@ -33,6 +36,52 @@ export const uploadContentSchema = z.object({
 
 export type UploadContentParams = z.infer<typeof uploadContentSchema>;
 
+const BASE64_TOKEN = /^[A-Za-z0-9+/]*={0,2}$/;
+
+/**
+ * Strictly decode standard (RFC 4648 section 4) base64.
+ *
+ * Buffer.from(s, "base64") never throws: it skips characters outside the
+ * alphabet and stops at the first "=", so plain text or trailing junk turns
+ * into a silently corrupted or truncated upload. This decoder accepts ASCII
+ * whitespace (line-wrapped base64) and unpadded input, and refuses everything
+ * the native decoder would have had to skip or guess at, including base64url
+ * ("-" and "_"), over-padding, and non-zero trailing bits.
+ */
+function decodeBase64Strict(content: string): Buffer {
+  const fail = (reason: string): never => {
+    throw new Error(`content is not valid base64: ${reason}`);
+  };
+
+  const token = content.replace(/[\t\n\v\f\r ]/g, "");
+  if (token.length === 0) fail("empty after removing whitespace");
+
+  if (!BASE64_TOKEN.test(token)) {
+    const padAt = token.indexOf("=");
+    if (padAt !== -1 && /[^=]/.test(token.slice(padAt))) {
+      fail(`data after "=" padding at offset ${padAt}`);
+    }
+    if (padAt !== -1) fail("more than two \"=\" padding characters");
+    const badAt = token.search(/[^A-Za-z0-9+/=]/);
+    fail(
+      `character ${JSON.stringify(token[badAt])} at offset ${badAt} is outside ` +
+        "the base64 alphabet (A-Z a-z 0-9 + /)"
+    );
+  }
+
+  if (token.length % 4 === 1) fail(`length ${token.length} is 1 more than a multiple of 4`);
+
+  const decoded = Buffer.from(token, "base64");
+  if (decoded.length === 0) fail("decodes to zero bytes");
+
+  const padded = token.padEnd(Math.ceil(token.length / 4) * 4, "=");
+  if (decoded.toString("base64") !== padded) {
+    fail("padding or trailing bits are not canonical");
+  }
+
+  return decoded;
+}
+
 export async function executeUploadContent(
   config: Config,
   grpcClient: KeystoneClient,
@@ -42,7 +91,7 @@ export async function executeUploadContent(
   const encoding = params.encoding || "utf8";
   const buffer =
     encoding === "base64"
-      ? Buffer.from(params.content, "base64")
+      ? decodeBase64Strict(params.content)
       : Buffer.from(params.content, "utf8");
 
   const originalSize = buffer.length;
@@ -71,6 +120,16 @@ export async function executeUploadContent(
     ]);
 
     const blobBytes = Buffer.from(JSON.stringify(encryptedBlob), "utf8");
+
+    if (blobBytes.length > MAX_UPLOAD_BYTES) {
+      throw new Error(
+        `Encrypted content too large for upload: ${blobBytes.length} bytes ` +
+          `after encrypting ${originalSize} bytes of content ` +
+          `(max ${MAX_UPLOAD_BYTES} bytes). ` +
+          "Split into smaller parts."
+      );
+    }
+
     const result = await grpcClient.storeContent(blobBytes, "application/json");
     const cid = result.descriptor.uri.replace("ipfs://", "");
 

@@ -10,6 +10,8 @@ export interface Config {
   pftlWssUrl: string;
   /** Primary IPFS gateway for reads (falls back to public gateways) */
   ipfsGatewayUrl: string;
+  /** Upper bound on bytes read from a gateway for one CID (default 16 MiB; the gateway falls back to the default when absent) */
+  ipfsMaxFetchBytes?: number;
   /** Keystone gRPC service URL */
   keystoneGrpcUrl: string;
   /** Keystone API key (auto-provisioned on first register_bot call) */
@@ -98,16 +100,48 @@ function loadTasknodeKey(): { key: Uint8Array | null; source: string | null } {
   return { key: new Uint8Array(decoded), source };
 }
 
-function parsePingInterval(envVal: string | undefined): number {
-  if (!envVal) return 900_000;
-  const parsed = parseInt(envVal, 10);
-  if (isNaN(parsed) || parsed < 0) {
+export const DEFAULT_IPFS_MAX_FETCH_BYTES = 16 * 1024 * 1024;
+export const DEFAULT_PING_INTERVAL_MS = 900_000;
+/**
+ * Largest delay Node's setTimeout/setInterval honour: 2^31-1 ms (~24.8 days).
+ * Anything larger emits TimeoutOverflowWarning and Node resets the delay to
+ * 1 ms, which would turn the ping loop into a hot loop.
+ */
+export const MAX_PING_INTERVAL_MS = 2_147_483_647;
+
+/**
+ * Parse an integer env setting from its whole trimmed token. parseInt reads
+ * only a numeric prefix ("5e3" -> 5, "15m" -> 15, "0.5" -> 0), which would
+ * silently turn a mis-typed value into a tiny interval or bound instead of
+ * the documented warn-and-default. Anything other than a run of decimal
+ * digits within [`minimum`, `maximum`] warns on stderr and falls back, as
+ * before. `maximum` defaults to Number.MAX_SAFE_INTEGER.
+ */
+function parseIntegerEnv(
+  name: string,
+  envVal: string | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number = Number.MAX_SAFE_INTEGER
+): number {
+  if (envVal === undefined || envVal.trim() === "") return fallback;
+  const token = envVal.trim();
+  const parsed = /^\d+$/.test(token) ? Number(token) : NaN;
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
     process.stderr.write(
-      `[config] WARN – Invalid PING_INTERVAL_MS="${envVal}", using default 900000ms\n`
+      `[config] WARN – Invalid ${name}="${envVal}", using default ${fallback}\n`
     );
-    return 900_000;
+    return fallback;
   }
   return parsed;
+}
+
+function parseIpfsMaxFetchBytes(envVal: string | undefined): number {
+  return parseIntegerEnv("IPFS_MAX_FETCH_BYTES", envVal, DEFAULT_IPFS_MAX_FETCH_BYTES, 1);
+}
+
+function parsePingInterval(envVal: string | undefined): number {
+  return parseIntegerEnv("PING_INTERVAL_MS", envVal, DEFAULT_PING_INTERVAL_MS, 0, MAX_PING_INTERVAL_MS);
 }
 
 export function loadConfig(): Config {
@@ -128,6 +162,7 @@ export function loadConfig(): Config {
     ipfsGatewayUrl:
       process.env.IPFS_GATEWAY_URL ||
       "https://ipfs-testnet.postfiat.org",
+    ipfsMaxFetchBytes: parseIpfsMaxFetchBytes(process.env.IPFS_MAX_FETCH_BYTES),
     keystoneGrpcUrl:
       process.env.KEYSTONE_GRPC_URL || "keystone-grpc.postfiat.org:443",
     keystoneApiKey,
