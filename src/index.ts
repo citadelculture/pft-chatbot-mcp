@@ -456,8 +456,8 @@ async function main() {
 
     server.tool(
       "dex_get_balances",
-      "Get the native PFT balance and all issued token trust-line balances for the bot's wallet or any PFTL address.",
-      { address: dexGetBalancesSchema.shape.address },
+      "Get the exact native PFT balance and one bounded page of trust lines for an account. Follow the returned marker until complete.",
+      { address: dexGetBalancesSchema.shape.address, limit: dexGetBalancesSchema.shape.limit, marker: dexGetBalancesSchema.shape.marker },
       async (params) => {
         try {
           const result = await executeDexGetBalances(config, keypair, params);
@@ -470,7 +470,7 @@ async function main() {
 
     server.tool(
       "dex_get_order_book",
-      'Fetch both sides of the PFTL DEX order book for any asset pair. Pass asset1 and asset2 as "PFT" or {currency, issuer}. Returns all resting orders with amounts and quality.',
+      'Fetch both sides of the PFTL DEX order book for any asset pair. Pass asset1 and asset2 as "PFT" or {currency, issuer}. Returns a bounded snapshot of each side with amounts and quality.',
       {
         asset1: dexGetOrderBookSchema.shape.asset1,
         asset2: dexGetOrderBookSchema.shape.asset2,
@@ -505,10 +505,11 @@ async function main() {
 
     server.tool(
       "dex_get_open_orders",
-      "Get all currently open limit orders for the bot's wallet or any PFTL address, across all trading pairs. Returns Sequence numbers needed for dex_cancel_order.",
+      "Get one bounded page of account open orders across trading pairs. Follow marker until complete. Returns order Sequence numbers.",
       {
         address: dexGetOpenOrdersSchema.shape.address,
         limit:   dexGetOpenOrdersSchema.shape.limit,
+        marker:  dexGetOpenOrdersSchema.shape.marker,
       },
       async (params) => {
         try {
@@ -652,8 +653,9 @@ async function main() {
 
     server.tool(
       "nft_get_listings",
-      "Scan a PFTL NFT issuer's collection for NFTs with active sell offers. Returns price, offer_id, and IPFS URI for each listed NFT. Use marker to paginate through large collections.",
+      "Scan NFTs currently held by account for active sell offers, not all NFTs minted by an issuer. Legacy issuer is an account alias. Follow marker for more holdings; each listing exposes offer-page continuation and native-price scope.",
       {
+        account: nftGetListingsSchema.shape.account,
         issuer: nftGetListingsSchema.shape.issuer,
         limit:  nftGetListingsSchema.shape.limit,
         marker: nftGetListingsSchema.shape.marker,
@@ -670,8 +672,8 @@ async function main() {
 
     server.tool(
       "nft_get_offers",
-      "Get all active sell offers for a specific NFT by its NFTokenID. Returns offer IDs, prices, and owners. Use the offer_id with nft_buy to purchase.",
-      { nft_id: nftGetOffersSchema.shape.nft_id },
+      "Get one bounded page of NFT sell offers, preserving native and issued amounts. Follow marker until complete; returns offer IDs and owners.",
+      { nft_id: nftGetOffersSchema.shape.nft_id, limit: nftGetOffersSchema.shape.limit, marker: nftGetOffersSchema.shape.marker },
       async (params) => {
         try {
           const result = await executeNftGetOffers(config, keypair, params);

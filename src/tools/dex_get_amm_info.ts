@@ -1,11 +1,11 @@
 import { z } from "zod";
 import type { Config } from "../config.js";
 import type { BotKeypair } from "../crypto/keys.js";
-import { rpcCall } from "../chain/submitter.js";
+import { queryRpc, QueryError } from "../chain/query.js";
+import { formatReadAmount, requestedAssetKey, reserveAssetKey } from "../dex/read_only.js";
 import {
   pftlAssetSchema,
   buildXrplAsset,
-  dropsToPft,
   type PftlAsset,
 } from "../dex/constants.js";
 
@@ -32,16 +32,18 @@ export async function executeDexGetAmmInfo(
   const xrplAsset1 = buildXrplAsset(params.asset1 as PftlAsset);
   const xrplAsset2 = buildXrplAsset(params.asset2 as PftlAsset);
 
+  if (requestedAssetKey(params.asset1) === requestedAssetKey(params.asset2)) throw new Error("AMM assets must differ");
+
   let resp: any;
   try {
-    resp = await rpcCall(config.pftlRpcUrl, "amm_info", {
+    resp = await queryRpc(config.pftlRpcUrl, "amm_info", {
       asset:        xrplAsset1,
       asset2:       xrplAsset2,
       ledger_index: "validated",
     });
   } catch (err: any) {
     // actNotFound means no AMM pool exists for this pair — not a fatal error
-    if (err.message?.includes("actNotFound") || err.message?.includes("Account not found")) {
+    if (err instanceof QueryError && err.code === "actNotFound") {
       return JSON.stringify(
         { error: "No AMM pool found for this asset pair on the PFTL ledger." },
         null,
@@ -52,29 +54,21 @@ export async function executeDexGetAmmInfo(
   }
 
   const amm = resp.amm;
-  if (!amm) {
-    return JSON.stringify(
-      { error: "No AMM pool found for this asset pair." },
-      null,
-      2
-    );
+  if (!amm || typeof amm !== "object") throw new Error("RPC amm_info: missing AMM object");
+
+  const reserves = [amm.amount, amm.amount2];
+  const keys = reserves.map(reserveAssetKey);
+  const first = keys.indexOf(requestedAssetKey(params.asset1));
+  const second = keys.indexOf(requestedAssetKey(params.asset2));
+  if (first < 0 || second < 0 || first === second || keys[0] === keys[1]) {
+    throw new Error("RPC AMM reserves do not match the requested asset identities");
   }
-
-  // Normalise reserves — either side may be native (drops) or issued (object)
-  const reserve1 =
-    typeof amm.amount === "string"
-      ? { currency: "PFT", amount: dropsToPft(amm.amount), drops: amm.amount }
-      : { currency: amm.amount.currency, issuer: amm.amount.issuer, amount: amm.amount.value };
-
-  const reserve2 =
-    typeof amm.amount2 === "string"
-      ? { currency: "PFT", amount: dropsToPft(amm.amount2), drops: amm.amount2 }
-      : { currency: amm.amount2.currency, issuer: amm.amount2.issuer, amount: amm.amount2.value };
-
-  // Spot price: reserve2 per reserve1 unit (both as floats)
-  const r1 = parseFloat(reserve1.amount);
-  const r2 = parseFloat(reserve2.amount);
-  const spotPrice = r1 > 0 && r2 > 0 ? (r2 / r1).toFixed(8) : null;
+  const reserve1 = formatReadAmount(reserves[first]);
+  const reserve2 = formatReadAmount(reserves[second]);
+  // Preserve the existing approximate eight-decimal price convention. Reserves stay exact.
+  const r1 = Number(reserve1.amount), r2 = Number(reserve2.amount);
+  const ratio = r2 / r1;
+  const spotPrice = r1 > 0 && r2 > 0 && Number.isFinite(ratio) ? ratio.toFixed(8) : null;
 
   return JSON.stringify(
     {

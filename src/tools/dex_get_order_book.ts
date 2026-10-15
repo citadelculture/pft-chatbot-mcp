@@ -1,11 +1,11 @@
 import { z } from "zod";
 import type { Config } from "../config.js";
 import type { BotKeypair } from "../crypto/keys.js";
-import { rpcCall } from "../chain/submitter.js";
+import { queryRpc } from "../chain/query.js";
+import { formatReadAmount } from "../dex/read_only.js";
 import {
   pftlAssetSchema,
   buildXrplAsset,
-  formatXrplAmount,
   type PftlAsset,
 } from "../dex/constants.js";
 
@@ -31,8 +31,8 @@ function formatOffer(offer: any) {
   return {
     account:    offer.Account,
     sequence:   offer.Sequence,
-    taker_pays: formatXrplAmount(offer.TakerPays),
-    taker_gets: formatXrplAmount(offer.TakerGets),
+    taker_pays: formatReadAmount(offer.TakerPays),
+    taker_gets: formatReadAmount(offer.TakerGets),
     quality:    offer.quality,
   };
 }
@@ -55,13 +55,13 @@ export async function executeDexGetOrderBook(
   const xrplAsset2 = buildXrplAsset(params.asset2 as PftlAsset);
 
   const [sideAResp, sideBResp] = await Promise.all([
-    rpcCall(config.pftlRpcUrl, "book_offers", {
+    queryRpc(config.pftlRpcUrl, "book_offers", {
       taker_pays:   xrplAsset1,
       taker_gets:   xrplAsset2,
       limit:        params.limit,
       ledger_index: "validated",
     }),
-    rpcCall(config.pftlRpcUrl, "book_offers", {
+    queryRpc(config.pftlRpcUrl, "book_offers", {
       taker_pays:   xrplAsset2,
       taker_gets:   xrplAsset1,
       limit:        params.limit,

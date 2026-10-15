@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { Config } from "../config.js";
 import type { BotKeypair } from "../crypto/keys.js";
-import { rpcCall } from "../chain/submitter.js";
+import { readPage, pageInfo } from "../chain/query.js";
 import { resolveIpfsUri } from "../dex/constants.js";
 
 export const nftGetOwnedSchema = z.object({
@@ -20,8 +20,9 @@ export const nftGetOwnedSchema = z.object({
     .describe("Maximum number of NFTs to return (1–400)."),
   marker: z
     .string()
+    .max(32768)
     .optional()
-    .describe("Pagination marker from a previous response to fetch the next page."),
+    .describe("Opaque pagination marker from a previous response to fetch the next page."),
   resolve_metadata: z
     .boolean()
     .default(false)
@@ -55,15 +56,8 @@ export async function executeNftGetOwned(
 ): Promise<string> {
   const address = params.address ?? keypair.address;
 
-  const reqParams: any = {
-    account:      address,
-    ledger_index: "validated",
-    limit:        params.limit,
-  };
-  if (params.marker) reqParams.marker = params.marker;
-
-  const resp = await rpcCall(config.pftlRpcUrl, "account_nfts", reqParams);
-  const nfts: any[] = resp.account_nfts ?? [];
+  const page = await readPage(config.pftlRpcUrl, "account_nfts", { account: address }, params.limit, params.marker);
+  const nfts = page.items;
 
   const items = await Promise.all(
     nfts.map(async (nft: any) => {
@@ -99,7 +93,7 @@ export async function executeNftGetOwned(
       address,
       nfts:   items,
       count:  items.length,
-      marker: resp.marker ?? null,
+      ...pageInfo(page),
     },
     null,
     2

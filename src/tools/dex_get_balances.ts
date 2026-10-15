@@ -1,60 +1,27 @@
 import { z } from "zod";
 import type { Config } from "../config.js";
 import type { BotKeypair } from "../crypto/keys.js";
-import { rpcCall } from "../chain/submitter.js";
-import { dropsToPft } from "../dex/constants.js";
+import { queryRpc, readPage, pageInfo, ledgerSelector, verifyLedgerPin } from "../chain/query.js";
+import { dropsToPftExact } from "../dex/read_only.js";
 
 export const dexGetBalancesSchema = z.object({
-  address: z
-    .string()
-    .optional()
-    .describe("PFTL wallet address to query. Defaults to the bot's own wallet."),
+  address: z.string().optional().describe("PFTL account to query; defaults to the bot's address."),
+  limit: z.number().int().min(1).max(400).default(200).describe("Maximum trust lines returned per call (1–400)."),
+  marker: z.string().max(32768).optional().describe("Opaque marker from the previous response for this account."),
 });
-
 export type DexGetBalancesParams = z.infer<typeof dexGetBalancesSchema>;
 
-/**
- * Return the native PFT balance and all issued token trust-line balances
- * for the bot's wallet or any PFTL address.
- */
-export async function executeDexGetBalances(
-  config: Config,
-  keypair: BotKeypair,
-  params: DexGetBalancesParams
-): Promise<string> {
+/** Native balance and a bounded, explicitly continued page of account trust lines. */
+export async function executeDexGetBalances(config: Config, keypair: BotKeypair, params: DexGetBalancesParams): Promise<string> {
   const address = params.address ?? keypair.address;
-
-  const [accountInfo, trustLines] = await Promise.all([
-    rpcCall(config.pftlRpcUrl, "account_info", {
-      account:      address,
-      ledger_index: "validated",
-    }),
-    rpcCall(config.pftlRpcUrl, "account_lines", {
-      account:      address,
-      ledger_index: "validated",
-    }),
-  ]);
-
-  const balanceDrops: string = accountInfo.account_data?.Balance ?? "0";
-
-  const lines: any[] = trustLines.lines ?? [];
-
-  return JSON.stringify(
-    {
-      address,
-      native: {
-        currency:       "PFT",
-        balance:        dropsToPft(balanceDrops),
-        balance_drops:  balanceDrops,
-      },
-      trust_lines: lines.map((l: any) => ({
-        currency: l.currency,
-        issuer:   l.account,
-        balance:  l.balance,
-        limit:    l.limit,
-      })),
-    },
-    null,
-    2
-  );
+  const page = await readPage(config.pftlRpcUrl, "account_lines", { account: address }, params.limit, params.marker);
+  const info = await queryRpc(config.pftlRpcUrl, "account_info", { account: address, ...ledgerSelector(page.pin) });
+  verifyLedgerPin(page.pin, info);
+  const balanceDrops = info.account_data?.Balance;
+  const balance = dropsToPftExact(balanceDrops);
+  return JSON.stringify({
+    address, native: { currency: "PFT", balance, balance_drops: balanceDrops },
+    trust_lines: page.items.map(l => ({ currency: l.currency, issuer: l.account, balance: l.balance, limit: l.limit })),
+    ...pageInfo(page),
+  }, null, 2);
 }

@@ -671,3 +671,7 @@ Use the `create_wallet` tool -- it works even without an existing seed. Start th
 
 **Q: How much does it cost to send a message?**
 Each message is a Payment transaction on the PFTL chain, which costs a small amount of PFT in fees (typically < 0.001 PFT). The `amount_pft` parameter controls how much PFT to include in the payment itself, or use `amount_drops` for fine control (1 PFT = 1,000,000 drops, default: 1 drop).
+
+### Read-only DEX/NFT query results
+
+See the [read-only query contract](docs/read-only-queries.md) for exact amount displays, bounded continuation, NFT account-holdings scope, offer completeness and the native fake-transport regression command.
