@@ -1,0 +1,117 @@
+
+> @postfiatorg/pft-chatbot-mcp@0.5.1 test:signals-native
+> npm run build && node scripts/signals-native-esm-regression.mjs
+
+
+> @postfiatorg/pft-chatbot-mcp@0.5.1 build
+> tsc && npm run copy-protos
+
+
+> @postfiatorg/pft-chatbot-mcp@0.5.1 copy-protos
+> rm -rf dist/grpc/protos && cp -r src/grpc/protos dist/grpc/protos
+
+{
+  "runtime": "v24.21.0",
+  "provenance": "Source-informed native built-JS import/decoder regression with independently constructed wire; no send/signing/provider paths",
+  "scope": "Initialization and declared foreign-wire decode only; not whole-envelope encode or complete feature adoption",
+  "passed": 24,
+  "failed": 0,
+  "cases": [
+    {
+      "name": "cold-native-price_quote",
+      "passed": true
+    },
+    {
+      "name": "cold-native-trade_intent",
+      "passed": true
+    },
+    {
+      "name": "cold-native-trade_confirmation",
+      "passed": true
+    },
+    {
+      "name": "cold-native-position_update",
+      "passed": true
+    },
+    {
+      "name": "cold-native-risk_metric",
+      "passed": true
+    },
+    {
+      "name": "cold-native-reward_offer",
+      "passed": true
+    },
+    {
+      "name": "cold-native-policy_update",
+      "passed": true
+    },
+    {
+      "name": "reused-native-0-price_quote",
+      "passed": true
+    },
+    {
+      "name": "reused-native-0-trade_intent",
+      "passed": true
+    },
+    {
+      "name": "reused-native-0-trade_confirmation",
+      "passed": true
+    },
+    {
+      "name": "reused-native-0-position_update",
+      "passed": true
+    },
+    {
+      "name": "reused-native-0-risk_metric",
+      "passed": true
+    },
+    {
+      "name": "reused-native-0-reward_offer",
+      "passed": true
+    },
+    {
+      "name": "reused-native-0-policy_update",
+      "passed": true
+    },
+    {
+      "name": "reused-native-1-price_quote",
+      "passed": true
+    },
+    {
+      "name": "reused-native-1-trade_intent",
+      "passed": true
+    },
+    {
+      "name": "reused-native-1-trade_confirmation",
+      "passed": true
+    },
+    {
+      "name": "reused-native-1-position_update",
+      "passed": true
+    },
+    {
+      "name": "reused-native-1-risk_metric",
+      "passed": true
+    },
+    {
+      "name": "reused-native-1-reward_offer",
+      "passed": true
+    },
+    {
+      "name": "reused-native-1-policy_update",
+      "passed": true
+    },
+    {
+      "name": "standalone-json-reward_offer",
+      "passed": true
+    },
+    {
+      "name": "standalone-json-policy_update",
+      "passed": true
+    },
+    {
+      "name": "malformed-wire-reaches-decoder",
+      "passed": true
+    }
+  ]
+}
