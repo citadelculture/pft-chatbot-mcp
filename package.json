@@ -22,7 +22,8 @@
     "lint": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test:grpc-integration": "npm run build && node scripts/grpc-reliability-integration.mjs && vitest run src/__tests__/grpc/client_deadline.test.ts src/__tests__/grpc/client_retry.test.ts src/__tests__/grpc/retry.test.ts"
   },
   "repository": {
     "type": "git",

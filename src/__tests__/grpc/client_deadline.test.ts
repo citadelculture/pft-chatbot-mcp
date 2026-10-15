@@ -28,7 +28,13 @@ function fakeClientWithPendingPing() {
     queueMicrotask(() => callback(error, {}));
   });
   const client = Object.create(KeystoneClient.prototype) as KeystoneClient;
-  Object.assign(client, { agentRegistry: { pingAgent }, apiKey: null });
+  // This helper bypasses construction. Supply the composed retry state explicitly
+  // while keeping these tests focused on one transport attempt's deadline.
+  Object.assign(client, {
+    agentRegistry: { pingAgent }, apiKey: null,
+    retryPolicy: { maxAttempts: 1, baseDelayMs: 1, maxDelayMs: 1 },
+    recreateAfter: 100, consecutiveTransientFailures: 0,
+  });
   return { client, pingAgent };
 }
 
