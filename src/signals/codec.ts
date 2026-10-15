@@ -10,6 +10,7 @@ import protobuf from "protobufjs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROTO_DIR = resolve(__dirname, "../grpc/protos");
@@ -98,77 +99,130 @@ function toTimestamp(
 ): { seconds: number; nanos: number } | undefined {
   if (value == null) return undefined;
   const ms = typeof value === "number" ? value : Date.parse(value as string);
-  if (isNaN(ms)) return undefined;
+  if (!Number.isSafeInteger(ms) || !Number.isFinite(new Date(ms).getTime())) {
+    throw new Error("Invalid timestamp: expected a valid date at millisecond precision");
+  }
   const nanos = ((ms % 1000) + 1000) % 1000 * 1_000_000; // guard against negative remainder
   return { seconds: Math.floor(ms / 1000), nanos };
 }
 
 function fromTimestamp(
-  ts: { seconds: string | number; nanos?: number } | null | undefined
+  ts: { seconds?: string | number; nanos?: number } | null | undefined
 ): string | null {
   if (!ts) return null;
-  const secs =
-    typeof ts.seconds === "string"
-      ? parseInt(ts.seconds, 10)
-      : (ts.seconds as number);
-  if (isNaN(secs)) return null;
-  return new Date(secs * 1000).toISOString();
+  // Proto3 JSON omits zero seconds, including timestamps in the first second.
+  const seconds = Number(ts.seconds ?? 0);
+  const nanos = ts.nanos ?? 0;
+  const milliseconds = seconds * 1000 + Math.floor(nanos / 1_000_000);
+  if (!Number.isFinite(milliseconds)) return null;
+  const date = new Date(milliseconds);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
-function isTimestampShape(
-  val: unknown
-): val is { seconds: string | number; nanos?: number } {
-  if (!val || typeof val !== "object" || Array.isArray(val)) return false;
-  const keys = Object.keys(val as object);
-  return keys.includes("seconds") && keys.length <= 2;
-}
-
-/** Recursively convert any Timestamp-shaped objects to ISO strings. */
-function timestampsToIso(obj: unknown): unknown {
-  if (isTimestampShape(obj)) return fromTimestamp(obj);
-  if (Array.isArray(obj)) return obj.map(timestampsToIso);
-  if (obj && typeof obj === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
-      out[k] = timestampsToIso(v);
-    }
-    return out;
-  }
-  return obj;
-}
-
-// ── Payload timestamp field normalization (ISO string → Timestamp object) ────
-
-const TIMESTAMP_FIELDS: Record<SignalKindKey, string[]> = {
-  price_quote:        ["quoted_at", "valid_until"],
-  trade_intent:       ["expires_at"],
-  trade_confirmation: ["confirmed_at"],
-  position_update:    ["snapshot_at"],
-  risk_metric:        ["computed_at"],
-  reward_offer:       [],
-  policy_update:      [],
-};
-
-function normalizePayloadTimestamps(
-  kind: SignalKindKey,
-  data: Record<string, unknown>
-): Record<string, unknown> {
+/** Convert only schema-declared timestamps, never timestamp-shaped metadata. */
+function timestampsToIso(type: protobuf.Type, data: Record<string, unknown>): unknown {
+  if (type.fullName === ".google.protobuf.Timestamp") return fromTimestamp(data);
   const result = { ...data };
-
-  for (const field of TIMESTAMP_FIELDS[kind]) {
-    if (result[field] && typeof result[field] === "string") {
-      result[field] = toTimestamp(result[field] as string);
+  for (const field of type.fieldsArray) {
+    field.resolve();
+    if (!(field.resolvedType instanceof protobuf.Type)) continue;
+    const nestedType = field.resolvedType;
+    const value = result[field.name];
+    if (value == null) continue;
+    const convert = (item: unknown): unknown =>
+      timestampsToIso(nestedType, item as Record<string, unknown>);
+    if (field.map) {
+      result[field.name] = Object.fromEntries(
+        Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, convert(item)])
+      );
+    } else if (field.repeated) {
+      result[field.name] = (value as unknown[]).map(convert);
+    } else {
+      result[field.name] = convert(value);
     }
   }
+  return result;
+}
 
-  // Handle nested `as_of` timestamps inside PositionUpdate.positions
-  if (kind === "position_update" && Array.isArray(result.positions)) {
-    result.positions = (result.positions as any[]).map((pos: any) => ({
-      ...pos,
-      as_of: pos.as_of ? toTimestamp(pos.as_of as string) : undefined,
-    }));
+// ── Strict JSON admission before protobuf verification ───────────────────────
+
+function normalizeInteger64(value: unknown, unsigned: boolean, path: string): protobuf.Long {
+  const validNumber = typeof value === "number" && Number.isSafeInteger(value);
+  const decimal = value instanceof protobuf.util.Long
+    ? value.toString()
+    : validNumber ? String(value) : value;
+  const pattern = unsigned ? /^(0|[1-9][0-9]*)$/ : /^(0|-?[1-9][0-9]*)$/;
+  if (typeof decimal !== "string" || !pattern.test(decimal)) {
+    throw new Error(`${path}: expected a canonical ${unsigned ? "unsigned " : ""}64-bit integer string or safe integer`);
   }
+  const integer = BigInt(decimal);
+  const minimum = unsigned ? 0n : -(1n << 63n);
+  const maximum = unsigned ? (1n << 64n) - 1n : (1n << 63n) - 1n;
+  if (integer < minimum || integer > maximum) throw new Error(`${path}: 64-bit integer out of range`);
+  // Validate before conversion: fromObject otherwise wraps/truncates invalid values.
+  return protobuf.util.LongBits.from(decimal).toLong(unsigned);
+}
 
+function normalizeScalar(field: protobuf.Field, value: unknown, path: string): unknown {
+  field.resolve();
+  const resolved = field.resolvedType;
+  if (resolved instanceof protobuf.Enum) {
+    if (typeof value === "string" && Object.hasOwn(resolved.values, value)) {
+      return resolved.values[value];
+    }
+    if (typeof value === "number" && Number.isInteger(value) && Object.hasOwn(resolved.valuesById, value)) {
+      return value;
+    }
+    throw new Error(`${path}: unknown ${resolved.name} value`);
+  }
+  if (["uint64", "fixed64", "int64", "sint64", "sfixed64"].includes(field.type)) {
+    return normalizeInteger64(value, field.type === "uint64" || field.type === "fixed64", path);
+  }
+  if (resolved instanceof protobuf.Type) {
+    if (resolved.fullName === ".google.protobuf.Timestamp" && typeof value === "string") {
+      return toTimestamp(value);
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(`${path}: object expected`);
+    }
+    return normalizeMessage(resolved, value as Record<string, unknown>, path);
+  }
+  // Preserve primitive types so verify still rejects e.g. booleans for strings.
+  return value;
+}
+
+function normalizeMessage(
+  type: protobuf.Type,
+  data: Record<string, unknown>,
+  path: string
+): Record<string, unknown> {
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error(`${path}: object expected`);
+  const result: Record<string, unknown> = {};
+  const seen = new Map<string, unknown>();
+  for (const [key, value] of Object.entries(data)) {
+    // Use the parser's own casing rule; underscore-before-digit stays intact.
+    const canonical = protobuf.util.camelCase(key);
+    const field = Object.hasOwn(type.fields, canonical) ? type.fields[canonical] : undefined;
+    if (!field) continue; // Keep protobuf's existing unknown-field behavior.
+    if (seen.has(canonical)) {
+      if (!isDeepStrictEqual(seen.get(canonical), value)) throw new Error(`${path}.${canonical}: conflicting aliases`);
+      continue;
+    }
+    seen.set(canonical, value);
+    if (value == null) {
+      result[canonical] = value; // Proto3 optional/null behavior is unchanged.
+    } else if (field.map) {
+      if (typeof value !== "object" || Array.isArray(value)) throw new Error(`${path}.${canonical}: object expected`);
+      result[canonical] = Object.fromEntries(Object.entries(value).map(([mapKey, item]) => [
+        mapKey, normalizeScalar(field, item, `${path}.${canonical}.${mapKey}`)
+      ]));
+    } else if (field.repeated) {
+      if (!Array.isArray(value)) throw new Error(`${path}.${canonical}: array expected`);
+      result[canonical] = value.map((item, index) => normalizeScalar(field, item, `${path}.${canonical}[${index}]`));
+    } else {
+      result[canonical] = normalizeScalar(field, value, `${path}.${canonical}`);
+    }
+  }
   return result;
 }
 
@@ -190,7 +244,7 @@ export async function encodePayload(
 
   const root = await getRoot();
   const MsgType = root.lookupType(meta.typeName);
-  const normalized = normalizePayloadTimestamps(kind, data);
+  const normalized = normalizeMessage(MsgType, data, kind);
 
   const err = MsgType.verify(normalized);
   if (err) throw new Error(`Invalid ${kind} payload: ${err}`);
@@ -239,10 +293,11 @@ export async function encodeFinancialSignal(
     msgObj.expiresAt = toTimestamp(options.expiresAt);
   }
 
-  const err = SignalType.verify(msgObj);
+  const normalized = normalizeMessage(SignalType, msgObj, "AgentFinancialSignal");
+  const err = SignalType.verify(normalized);
   if (err) throw new Error(`AgentFinancialSignal validation failed: ${err}`);
 
-  return Buffer.from(SignalType.encode(SignalType.create(msgObj)).finish());
+  return Buffer.from(SignalType.encode(SignalType.create(normalized)).finish());
 }
 
 // ── Decoded signal shape ──────────────────────────────────────────────────────
@@ -295,7 +350,7 @@ export async function decodeFinancialSignal(
     if (meta.typeName && rawBytes.length > 0) {
       const PayloadType = root.lookupType(meta.typeName);
       const decoded = PayloadType.decode(rawBytes).toJSON();
-      decodedPayload = timestampsToIso(decoded) as Record<string, unknown>;
+      decodedPayload = timestampsToIso(PayloadType, decoded) as Record<string, unknown>;
     } else if (!meta.typeName && rawBytes.length > 0) {
       // reward_offer / policy_update were serialized as JSON
       try {
